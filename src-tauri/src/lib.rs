@@ -1121,30 +1121,18 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
-// ---- PORTABLE OVERRIDE MODE FOR WEBVIEW2 ----
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let config_marker = exe_dir.join("portable_config.txt");
-            if config_marker.exists() {
-                if let Ok(saved_path) = std::fs::read_to_string(&config_marker) {
-                    let trimmed = saved_path.trim();
-                    if !trimmed.is_empty() {
-                        let portable_root = std::path::PathBuf::from(trimmed);
-                        let webview_cache = portable_root.join("webview_cache");
-
-                        // Ensure the webview cache directory exists on the portable drive
-                        if !webview_cache.exists() {
-                            let _ = std::fs::create_dir_all(&webview_cache);
-                        }
-
-                        // Redirect the WebView2 user data folder to the isolated portable path
-                        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", webview_cache);
-                    }
-                }
-            }
-        }
+    if crate::store::is_portable() {
+        eprintln!("[launcher] 🚀 Running in PORTABLE mode");
     }
-    // ---------------------------------------------
+    // ---- PORTABLE OVERRIDE MODE FOR WEBVIEW2 ----
+    if let Some(portable) = crate::store::portable_root().ok().flatten() {
+        let webview_cache = portable.join("webview_cache");
+        if !webview_cache.exists() {
+            let _ = std::fs::create_dir_all(&webview_cache);
+        }
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", webview_cache);
+    }
+    // ---- END OF PORTABLE MODE ----
     tauri::Builder::default()
         // Must be the first plugin: a second launch focuses the running window.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
