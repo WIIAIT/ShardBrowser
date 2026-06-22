@@ -6,15 +6,13 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, Window};
-//use tokio::io::AsyncWriteExt;
 
 const PUB_BASE: &str = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
-/// Version manifest (GitHub raw) — one tiny GET yields every archive's current
-/// etag, so install/status checks never poll R2/S3 per-archive.
+/// Version manifest (GitHub raw)
 const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/ProxyShard/ShardBrowser/main/runtime.json";
 const LAUNCHER_RELEASE_REPO: &str = "ProxyShard/ShardBrowser";
-/// Chromium version baked into the current bundle (used for Mac Framework path).
+/// Chromium version baked into the current bundle
 const CHROMIUM_VERSION: &str = "149.0.7827.103";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -42,6 +40,7 @@ pub fn host_spec() -> Option<PlatformSpec> {
             label: "Widevine CDM".into(),
         }),
     });
+
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     return Some(PlatformSpec {
         browser: ArchiveSpec {
@@ -53,6 +52,7 @@ pub fn host_spec() -> Option<PlatformSpec> {
             label: "Widevine CDM".into(),
         }),
     });
+
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     return Some(PlatformSpec {
         browser: ArchiveSpec {
@@ -64,35 +64,24 @@ pub fn host_spec() -> Option<PlatformSpec> {
             label: "Widevine CDM".into(),
         }),
     });
+
     #[allow(unreachable_code)]
     None
 }
 
-/// Runtime dir under the platform data dir; kept outside the launcher bundle.
+/// Runtime dir (portable or standard)
 pub fn runtime_dir() -> Result<PathBuf> {
-    // 1. Check if there is a portable mode configuration next to the EXE.
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let config_marker = exe_dir.join("portable_config.txt");
-            if config_marker.exists() {
-                if let Ok(saved_path) = std::fs::read_to_string(&config_marker) {
-                    let trimmed = saved_path.trim();
-                    if !trimmed.is_empty() {
-                        let portable_runtime = PathBuf::from(trimmed).join("runtime");
-                        // If the folder is not created, create it
-                        if !portable_runtime.exists() {
-                            std::fs::create_dir_all(&portable_runtime)?;
-                        }
-                        return Ok(portable_runtime);
-                    }
-                }
-            }
+    // 1. Portable mode via store.rs
+    if let Some(portable) = crate::store::portable_root()? {
+        let runtime = portable.join("runtime");
+        if !runtime.exists() {
+            std::fs::create_dir_all(&runtime)?;
         }
+        return Ok(runtime);
     }
 
-    // 2. If there is no configuration file, we use the standard mode via system Roaming.
-    let base = dirs::data_dir()
-        .context("platform data dir not available")?;
+    // 2. Standard mode
+    let base = dirs::data_dir().context("platform data dir not available")?;
 
     let runtime_path = base.join("shardx-launcher").join("runtime");
     if !runtime_path.exists() {
@@ -112,18 +101,22 @@ pub fn binary_path() -> Result<PathBuf> {
         .join("Contents")
         .join("MacOS")
         .join("ShardX"));
+
     #[cfg(target_os = "windows")]
     return Ok(base.join("ShardX-Windows").join("chrome.exe"));
+
     #[cfg(target_os = "linux")]
     return Ok(base.join("ShardX-Linux").join("chrome"));
+
+    #[allow(unreachable_code)]
+    Err(anyhow::anyhow!("Unsupported platform"))
 }
 
 fn manifest_path() -> Result<PathBuf> {
     Ok(runtime_dir()?.join("manifest.json"))
 }
 
-/// Top-level dir (under runtime_dir) the engine archive extracts into. Wiped
-/// before a re-extract so stale files from the previous version can't linger.
+/// Top-level dir the engine archive extracts into.
 fn engine_root_dir() -> &'static str {
     #[cfg(target_os = "macos")]
     return "ShardX-Mac-arm64";
@@ -135,7 +128,7 @@ fn engine_root_dir() -> &'static str {
     return "ShardX-Engine";
 }
 
-// Bundled fingerprint library (cross-platform); seeds fingerprints dir on first run.
+// Bundled fingerprint library
 const FINGERPRINTS_ARCHIVE_KEY: &str = "ShardX-Fingerprints.zip";
 const FINGERPRINTS_TOP_DIR: &str = "shardx-fingerprints";
 
@@ -144,30 +137,15 @@ struct Manifest {
     browser_etag: Option<String>,
     widevine_etag: Option<String>,
     fingerprints_etag: Option<String>,
-    /// Chromium version the *already-created* profiles were last migrated to.
-    /// Lets us bump saved profiles' UA + client_hints when the engine updates,
-    /// independent of the fingerprint-library seed.
     #[serde(default)]
     applied_chromium_version: Option<String>,
-    /// Signature (`<version>|<grease_brand>|<grease_version>`) of the engine
-    /// descriptor the profiles/fingerprints were last migrated against. Migration
-    /// re-runs whenever this changes — so adding grease (or any future field) to
-    /// the manifest auto-triggers a re-migration even for users already on the
-    /// current `applied_chromium_version`. No bump-the-constant ceremony.
     #[serde(default)]
     applied_signature: Option<String>,
-    /// Chromium version of the engine binary currently extracted on disk.
-    /// The engine update is detected by comparing THIS to the manifest's
-    /// `chromium_version` — robust where the etag check failed (e.g. a user who
-    /// updated the app but whose stored etag already matched).
     #[serde(default)]
     installed_chromium_version: Option<String>,
 }
 
-/// Chromium version of the engine actually on disk (ground truth), read from
-/// the bundle layout: the macOS Framework `Versions/<ver>/` dir, the Windows
-/// `<ver>.manifest` file. Returns `None` on Linux (no on-disk marker) — callers
-/// fall back to the stored `installed_chromium_version`.
+/// Chromium version of the engine actually on disk
 fn installed_engine_version() -> Option<String> {
     let base = runtime_dir().ok()?;
     #[cfg(target_os = "macos")]
@@ -190,9 +168,6 @@ fn installed_engine_version() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
         let dir = base.join("ShardX-Windows");
-        // Marker is the `<version>.manifest` sidecar next to chrome.exe. Require
-        // the stem to parse as a dotted version so a stray/leftover file can't
-        // feed a bogus version into the update check.
         let looks_like_version =
             |s: &str| s.split('.').count() >= 2 && s.starts_with(|c: char| c.is_ascii_digit());
         for ent in fs::read_dir(&dir).ok()?.flatten() {
@@ -208,27 +183,20 @@ fn installed_engine_version() -> Option<String> {
         None
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = base;
-        None
-    }
+    None
 }
 
-/// Effective installed engine version. Trusts the version recorded at install
-/// time (authoritative — written only after a successful download+extract) over
-/// re-reading it off disk, whose layout varies per-OS and can carry stale files
-/// from a previous version (a leftover `<old>.manifest` made Windows re-download
-/// forever). On-disk detection is the fallback for legacy installs that predate
-/// `installed_chromium_version`.
 fn effective_installed_version(local: &Manifest) -> Option<String> {
     local
         .installed_chromium_version
         .clone()
-        .or_else(installed_engine_version)
+        .or_else(|| installed_engine_version())
 }
 
 fn load_manifest() -> Manifest {
-    let Ok(p) = manifest_path() else { return Manifest::default() };
+    let Ok(p) = manifest_path() else {
+        return Manifest::default();
+    };
     fs::read_to_string(p)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -250,7 +218,6 @@ pub struct RuntimeStatus {
     pub remote_browser_etag: Option<String>,
     pub update_available: bool,
     pub spec: Option<PlatformSpec>,
-    /// True once the fingerprint library bundle has been extracted.
     pub fingerprints_installed: bool,
 }
 
@@ -258,16 +225,10 @@ pub struct RuntimeStatus {
 struct RemoteManifest {
     archives: std::collections::HashMap<String, String>,
     chromium_version: Option<String>,
-    /// GREASE brand/version the engine emits in `sec-ch-ua`. Not derivable from
-    /// the version number (it rotates per major release), so it travels in the
-    /// manifest as data — migration writes it into every profile/fingerprint.
     grease_brand: Option<String>,
     grease_version: Option<String>,
 }
 
-/// Fetch the version manifest (GitHub raw) — one request yielding every
-/// archive's current etag + the chromium version, so install/status never poll
-/// R2/S3 per-archive. Empty/None when unreachable.
 async fn fetch_manifest() -> RemoteManifest {
     async fn inner() -> Option<RemoteManifest> {
         let resp = reqwest::Client::new().get(MANIFEST_URL).send().await.ok()?;
@@ -285,6 +246,7 @@ async fn fetch_manifest() -> RemoteManifest {
             })
             .unwrap_or_default();
         let str_field = |k: &str| v.get(k).and_then(|s| s.as_str()).map(String::from);
+
         Some(RemoteManifest {
             archives,
             chromium_version: str_field("chromium_version"),
@@ -295,24 +257,33 @@ async fn fetch_manifest() -> RemoteManifest {
     inner().await.unwrap_or_default()
 }
 
-/// Migrate every `*.json` in `dir` to a new engine descriptor: bump
-/// `navigator.user_agent` (Chrome/<major>.0.0.0) and the version fields in
-/// `client_hints` — `brand_version` / `brand_full_version` / `chrome_build` /
-/// `chrome_version`. Modifies profiles in-place.
-async fn migrate_profiles(dir: &Path, chromium_version: &str, brand_version: &str, brand_full_version: &str, chrome_build: &str) -> Result<()> {
+async fn migrate_profiles(
+    dir: &Path,
+    chromium_version: &str,
+    brand_version: &str,
+    brand_full_version: &str,
+    chrome_build: &str,
+) -> Result<()> {
     if !dir.exists() {
         return Ok(());
     }
     let major = chromium_version.split('.').next().unwrap_or("130");
-    let target_ua = format!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36");
+    let target_ua = format!(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    );
 
     for ent in fs::read_dir(dir)?.flatten() {
         let p = ent.path();
         if p.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let Ok(body) = fs::read_to_string(&p) else { continue; };
-        let Ok(mut val): std::result::Result<serde_json::Value, _> = serde_json::from_str(&body) else { continue; };
+        let Ok(body) = fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(mut val): std::result::Result<serde_json::Value, _> = serde_json::from_str(&body)
+        else {
+            continue;
+        };
 
         if let Some(nav) = val.get_mut("navigator") {
             if let Some(ua) = nav.get_mut("user_agent") {
@@ -344,21 +315,27 @@ async fn migrate_profiles(dir: &Path, chromium_version: &str, brand_version: &st
 pub async fn runtime_status() -> Result<RuntimeStatus, String> {
     let spec = host_spec();
     let local = load_manifest();
-
-    // We safely get the path to the binary. If a path error has occurred, we pass it as a string.
     let r_dir = runtime_dir().map_err(|e| format!("Runtime directory error: {}", e))?;
 
     #[cfg(target_os = "macos")]
-    let b_path_expected = r_dir.join("ShardX-Mac-arm64").join("ShardX.app").join("Contents").join("MacOS").join("ShardX");
+    let b_path_expected = r_dir
+        .join("ShardX-Mac-arm64")
+        .join("ShardX.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("ShardX");
     #[cfg(target_os = "windows")]
     let b_path_expected = r_dir.join("ShardX-Windows").join("chrome.exe");
     #[cfg(target_os = "linux")]
     let b_path_expected = r_dir.join("ShardX-Linux").join("chrome");
 
     let installed = b_path_expected.exists();
-    let b_path = if installed { Some(b_path_expected) } else { None };
+    let b_path = if installed {
+        Some(b_path_expected)
+    } else {
+        None
+    };
 
-    // Check fingerprints dir status
     let fingerprints_installed = crate::store::fingerprints_dir()
         .map(|d| d.join("starter-desktop-windows-nvidia.json").exists())
         .unwrap_or(false);
@@ -388,8 +365,6 @@ pub async fn runtime_status() -> Result<RuntimeStatus, String> {
         }
     }
 
-    // Secondary check: if remote manifest tells us a newer chromium version than
-    // what we recorded during the last extract, an update is available.
     if let Some(ref rem_ver) = remote.chromium_version {
         if let Some(inst_ver) = effective_installed_version(&local) {
             if inst_ver != *rem_ver {
@@ -409,42 +384,35 @@ pub async fn runtime_status() -> Result<RuntimeStatus, String> {
     })
 }
 
-// Internal helper for decompressing ZIP with full normalization of paths under Windows
 fn extract_zip(bytes: &[u8], target: &Path) -> Result<()> {
     let reader = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(reader)
         .map_err(|e| anyhow::anyhow!("Failed to open zip archive: {}", e))?;
 
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i)
+        let mut file = archive
+            .by_index(i)
             .map_err(|e| anyhow::anyhow!("Failed to read file inside zip: {}", e))?;
 
-        // We get a clean inner path without dangerous relative transitions
         let enclosed = match file.enclosed_name() {
             Some(path) => path,
             None => continue,
         };
 
-        // Collecting the absolute path on the disk
         let outpath = target.join(enclosed);
 
-        // Normalize the path: remove unnecessary dots, duplicate slashes, and end separators.
         if file.name().ends_with('/') || file.name().ends_with('\\') {
             if !outpath.exists() {
-                fs::create_dir_all(&outpath)
-                    .map_err(|e| anyhow::anyhow!("Failed to create directory {:?}: {}", outpath, e))?;
+                fs::create_dir_all(&outpath)?;
             }
         } else {
             if let Some(p) = outpath.parent() {
                 if !p.exists() {
-                    fs::create_dir_all(p)
-                        .map_err(|e| anyhow::anyhow!("Failed to create parent directory {:?}: {}", p, e))?;
+                    fs::create_dir_all(p)?;
                 }
             }
-            let mut outfile = fs::File::create(&outpath)
-                .map_err(|e| anyhow::anyhow!("Failed to create file {:?}: {}", outpath, e))?;
-            std::io::copy(&mut file, &mut outfile)
-                .map_err(|e| anyhow::anyhow!("Failed to write data to {:?}: {}", outpath, e))?;
+            let mut outfile = fs::File::create(&outpath)?;
+            std::io::copy(&mut file, &mut outfile)?;
         }
     }
     Ok(())
@@ -469,7 +437,7 @@ pub async fn runtime_install(window: Window) -> Result<(), String> {
 
     let mut local = load_manifest();
 
-    // 1. Download & Extract Browser if missing or stale
+    // 1. Browser
     let current_inst_ver = effective_installed_version(&local);
     let browser_stale = local.browser_etag.as_ref() != Some(remote_browser_etag)
         || current_inst_ver.is_none()
@@ -498,7 +466,7 @@ pub async fn runtime_install(window: Window) -> Result<(), String> {
         save_manifest(&local).map_err(|e| e.to_string())?;
     }
 
-    // 2. Download & Extract Widevine if applicable
+    // 2. Widevine
     if let Some(ref w_spec) = spec.widevine {
         if let Some(r_wv_etag) = remote_widevine_etag {
             let wv_cache = crate::store::widevine_cache_dir().map_err(|e| e.to_string())?;
@@ -528,14 +496,17 @@ pub async fn runtime_install(window: Window) -> Result<(), String> {
         }
     }
 
-    // 3. Download & Seed Fingerprints library if missing or stale
+    // 3. Fingerprints
     if let Some(r_fp_etag) = remote_fingerprints_etag {
         let fp_dir = crate::store::fingerprints_dir().map_err(|e| e.to_string())?;
         let marker = fp_dir.join("starter-desktop-windows-nvidia.json");
         let fp_stale = local.fingerprints_etag.as_ref() != Some(r_fp_etag) || !marker.exists();
 
         if fp_stale {
-            let _ = window.emit("runtime:progress", "Downloading global fingerprint assets...");
+            let _ = window.emit(
+                "runtime:progress",
+                "Downloading global fingerprint assets...",
+            );
             let url = format!("{PUB_BASE}/{FINGERPRINTS_ARCHIVE_KEY}");
             let bytes = reqwest::get(&url)
                 .await
@@ -569,7 +540,7 @@ pub async fn runtime_install(window: Window) -> Result<(), String> {
         }
     }
 
-    // 4. Run version migration on existing profiles if engine version changed
+    // 4. Migration
     if let Some(ref cv) = remote.chromium_version {
         let sig = format!(
             "{}|{}|{}",
@@ -640,13 +611,10 @@ pub async fn launcher_update_check() -> Result<LauncherVersionInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let url = format!("https://api.github.com/repos/{LAUNCHER_RELEASE_REPO}/releases/latest");
 
-    let client = match reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .user_agent(format!("shardx-launcher/{current}"))
         .build()
-    {
-        Ok(c) => c,
-        Err(e) => return Err(e.to_string()),
-    };
+        .map_err(|e| e.to_string())?;
 
     let resp = client
         .get(&url)
@@ -656,25 +624,42 @@ pub async fn launcher_update_check() -> Result<LauncherVersionInfo, String> {
 
     let Ok(resp) = resp else {
         return Ok(LauncherVersionInfo {
-            current, latest: None, update_available: false, release_url: None,
+            current,
+            latest: None,
+            update_available: false,
+            release_url: None,
         });
     };
 
     if !resp.status().is_success() {
         return Ok(LauncherVersionInfo {
-            current, latest: None, update_available: false, release_url: None,
+            current,
+            latest: None,
+            update_available: false,
+            release_url: None,
         });
     }
 
     let body: serde_json::Value = match resp.json().await {
         Ok(v) => v,
-        Err(_) => return Ok(LauncherVersionInfo {
-            current, latest: None, update_available: false, release_url: None,
-        }),
+        Err(_) => {
+            return Ok(LauncherVersionInfo {
+                current,
+                latest: None,
+                update_available: false,
+                release_url: None,
+            });
+        }
     };
 
-    let latest = body.get("tag_name").and_then(|v| v.as_str()).map(String::from);
-    let release_url = body.get("html_url").and_then(|v| v.as_str()).map(String::from);
+    let latest = body
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let release_url = body
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let mut update_available = false;
     if let Some(ref lat) = latest {
